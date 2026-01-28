@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>.bib sorter (first-author surname)</title>
   <style>
     :root { color-scheme: light dark; }
@@ -58,9 +58,15 @@
 
     <div class="card">
       <div class="row">
-        <input id="file" type="file" accept=".bib,text/x-bibtex" />
+        <input id="file" type="file" accept=".bib,text/x-bibtex">
         <button id="sortBtn" class="btn" disabled>Sort & generate</button>
-        <a id="download" class="btn" style="text-decoration:none; display:inline-block;" href="#" download="ordered.bib" aria-disabled="true">Download ordered.bib</a>
+        <a id="download"
+         class="btn"
+         style="text-decoration:none; display:inline-block;"
+         download="ordered.bib"
+         aria-disabled="true"
+         tabindex="-1">Download ordered.bib</a>
+
         <button id="clearBtn" class="btn" disabled>Clear</button>
       </div>
 
@@ -105,6 +111,9 @@
     elDownload.style.opacity = enabled ? '1' : '0.5';
     elDownload.style.pointerEvents = enabled ? 'auto' : 'none';
     elDownload.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    elDownload.tabIndex = enabled ? 0 : -1;
+  
+    if (!enabled) elDownload.removeAttribute('href'); // <-- important
   }
 
   function cleanupBlobUrl() {
@@ -122,9 +131,10 @@
     elSort.disabled = true;
     elClear.disabled = true;
     setDownloadEnabled(false);
-    elDownload.href = '#';
+    // elDownload.href = '#';   // <-- delete this line
     elFile.value = '';
   }
+
 
   // --- BibTeX parsing utilities (minimal but robust for typical .bib files) ---
 
