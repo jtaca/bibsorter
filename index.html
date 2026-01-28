@@ -60,13 +60,7 @@
       <div class="row">
         <input id="file" type="file" accept=".bib,text/x-bibtex">
         <button id="sortBtn" class="btn" disabled>Sort & generate</button>
-        <a id="download"
-         class="btn"
-         style="text-decoration:none; display:inline-block;"
-         download="ordered.bib"
-         aria-disabled="true"
-         tabindex="-1">Download ordered.bib</a>
-
+        <button id="download" class="btn" type="button" disabled>Download ordered.bib</button>
         <button id="clearBtn" class="btn" disabled>Clear</button>
       </div>
 
@@ -102,19 +96,27 @@
 
   const collator = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
 
+  elDownload.addEventListener('click', () => {
+    if (!lastBlobUrl) return;
+  
+    const a = document.createElement('a');
+    a.href = lastBlobUrl;
+    a.download = 'ordered.bib';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+
   function setMessage(html, kind) {
     elMsg.className = kind ? kind : '';
     elMsg.innerHTML = html || '';
   }
 
   function setDownloadEnabled(enabled) {
-    elDownload.style.opacity = enabled ? '1' : '0.5';
-    elDownload.style.pointerEvents = enabled ? 'auto' : 'none';
-    elDownload.setAttribute('aria-disabled', enabled ? 'false' : 'true');
-    elDownload.tabIndex = enabled ? 0 : -1;
-  
-    if (!enabled) elDownload.removeAttribute('href'); // <-- important
+    elDownload.disabled = !enabled;
   }
+
 
   function cleanupBlobUrl() {
     if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
@@ -131,7 +133,6 @@
     elSort.disabled = true;
     elClear.disabled = true;
     setDownloadEnabled(false);
-    // elDownload.href = '#';   // <-- delete this line
     elFile.value = '';
   }
 
@@ -534,8 +535,6 @@
 
       const blob = new Blob([output], { type: 'text/x-bibtex;charset=utf-8' });
       lastBlobUrl = URL.createObjectURL(blob);
-      elDownload.href = lastBlobUrl;
-      elDownload.download = 'ordered.bib';
       setDownloadEnabled(true);
 
       const preview = sorted.slice(0, 8).map(e => {
