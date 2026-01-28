@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>.bib sorter (first-author surname)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 24px; }
+    .wrap { max-width: 900px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p { margin: 8px 0 16px; opacity: 0.85; line-height: 1.35; }
+    .card { border: 1px solid rgba(127,127,127,.35); border-radius: 14px; padding: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .btn {
+      border: 1px solid rgba(127,127,127,.45);
+      background: transparent;
+      padding: 10px 12px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .drop {
+      margin-top: 12px;
+      border: 2px dashed rgba(127,127,127,.45);
+      border-radius: 14px;
+      padding: 18px;
+      text-align: center;
+      opacity: .9;
+    }
+    .drop.drag { border-color: rgba(80,140,255,.9); }
+    textarea {
+      width: 100%;
+      min-height: 260px;
+      resize: vertical;
+      margin-top: 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(127,127,127,.35);
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12.5px;
+      line-height: 1.35;
+    }
+    .meta { margin-top: 10px; font-size: 13px; opacity: .85; }
+    .err { margin-top: 10px; color: #c0392b; font-weight: 700; }
+    .ok  { margin-top: 10px; color: #1e8449; font-weight: 700; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>.bib sorter</h1>
+    <p>
+      Upload a <code>.bib</code>, sort entries by <b>first author surname</b>, then download <code>ordered.bib</code>.
+      Runs locally in your browser.
+    </p>
+
+    <div class="card">
+      <div class="row">
+        <input id="file" type="file" accept=".bib,text/x-bibtex" />
+        <button id="sortBtn" class="btn" disabled>Sort & generate</button>
+        <a id="download" class="btn" style="text-decoration:none; display:inline-block;" href="#" download="ordered.bib" aria-disabled="true">Download ordered.bib</a>
+        <button id="clearBtn" class="btn" disabled>Clear</button>
+      </div>
+
+      <div id="drop" class="drop" tabindex="0">
+        Drag & drop your <code>.bib</code> here (or use the file picker).
+      </div>
+
+      <div id="status" class="meta">No file loaded.</div>
+      <div id="msg"></div>
+
+      <textarea id="out" placeholder="Sorted BibTeX will appear here…" spellcheck="false"></textarea>
+    </div>
+
+    <p class="meta">
+      Sorting key: author → editor → key (fallback). Ties broken by year, title, then citation key.
+    </p>
+  </div>
+
+<script>
+(() => {
+  const elFile = document.getElementById('file');
+  const elSort = document.getElementById('sortBtn');
+  const elClear = document.getElementById('clearBtn');
+  const elDrop = document.getElementById('drop');
+  const elStatus = document.getElementById('status');
+  const elMsg = document.getElementById('msg');
+  const elOut = document.getElementById('out');
+  const elDownload = document.getElementById('download');
+
+  let loadedText = null;
+  let loadedName = null;
+  let lastBlobUrl = null;
+
+  const collator = new Intl.Collator('en', { sensitivity: 'base', numeric: true });
+
+  function setMessage(html, kind) {
+    elMsg.className = kind ? kind : '';
+    elMsg.innerHTML = html || '';
+  }
+
+  function setDownloadEnabled(enabled) {
+    elDownload.style.opacity = enabled ? '1' : '0.5';
+    elDownload.style.pointerEvents = enabled ? 'auto' : 'none';
+    elDownload.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  }
+
+  function cleanupBlobUrl() {
+    if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+    lastBlobUrl = null;
+  }
+
+  function resetAll() {
+    cleanupBlobUrl();
+    loadedText = null;
+    loadedName = null;
+    elOut.value = '';
+    elStatus.textContent = 'No file loaded.';
+    setMessage('', '');
+    elSort.disabled = true;
+    elClear.disabled = true;
+    setDownloadEnabled(false);
+    elDownload.href = '#';
+    elFile.value = '';
+  }
+
+  // --- BibTeX parsing utilities (minimal but robust for typical .bib files) ---
+
+  function isWordChar(ch) {
+    return /[A-Za-z0-9_\-:.+]/.test(ch);
+  }
+
+  function parseBibFile(text) {
+    // Split into entries by scanning for @...{...} / @...(...)
+    const entries = [];
+    let preface = '';
+
+    let i = 0;
+    while (i < text.length) {
+      const at = text.indexOf('@', i);
+      if (at === -1) {
+        preface += text.slice(i);
+        break;
+      }
+
+      preface += text.slice(i, at);
+
+      const parsed = parseEntryAt(text, at);
+      if (!parsed) {
+        // If we can't parse, treat the '@' as normal text and continue.
+        preface += '@';
+        i = at + 1;
+        continue;
+      }
+
+      entries.push(parsed.entry);
+      i = parsed.nextIndex;
+    }
+
+    // Non-sortable entries (string/preamble/comment) are kept at top (in original order).
+    const nonsortable = [];
+    const sortable = [];
+
+    for (const e of entries) {
+      const t = (e.type || '').toLowerCase();
+      if (t === 'string' || t === 'preamble' || t === 'comment') nonsortable.push(e);
+      else sortable.push(e);
+    }
+
+    return { preface, nonsortable, sortable };
+  }
+
+  function parseEntryAt(text, start) {
+    // Parse @type{...} or @type(...)
+    let i = start;
+    if (text[i] !== '@') return null;
+    i++;
+
+    // read type
+    while (i < text.length && /\s/.test(text[i])) i++;
+    const typeStart = i;
+    while (i < text.length && isWordChar(text[i])) i++;
+    const type = text.slice(typeStart, i).trim();
+    if (!type) return null;
+
+    while (i < text.length && /\s/.test(text[i])) i++;
+    const open = text[i];
+    if (open !== '{' && open !== '(') return null;
+    const close = open === '{' ? '}' : ')';
+
+    const entryStart = start;
+    const openPos = i;
+
+    // find matching close
+    let depth = 1;
+    let inQuotes = false;
+    i = openPos + 1;
+
+    while (i < text.length) {
+      const ch = text[i];
+
+      // Toggle quote state (simple handling; good enough for common BibTeX)
+      if (ch === '"' && text[i - 1] !== '\\') inQuotes = !inQuotes;
+
+      if (!inQuotes) {
+        if (ch === open) depth++;
+        else if (ch === close) depth--;
+        if (depth === 0) {
+          const raw = text.slice(entryStart, i + 1);
+          const meta = extractMeta(raw);
+          return {
+            entry: { raw, type: meta.type, key: meta.key, fields: meta.fields },
+            nextIndex: i + 1
+          };
+        }
+      } else {
+        // inside quotes: still count braces/parentheses for the outer delimiter if it matches
+        if (ch === open) depth++;
+        else if (ch === close) depth--;
+        if (depth === 0) {
+          const raw = text.slice(entryStart, i + 1);
+          const meta = extractMeta(raw);
+          return {
+            entry: { raw, type: meta.type, key: meta.key, fields: meta.fields },
+            nextIndex: i + 1
+          };
+        }
+      }
+
+      i++;
+    }
+
+    return null; // unmatched
+  }
+
+  function extractMeta(raw) {
+    // Extract type, citation key, and a few fields (author/editor/year/title) for sorting.
+    // Keeps raw untouched for output.
+    let i = 0;
+    while (i < raw.length && raw[i] !== '@') i++;
+    i++;
+    while (i < raw.length && /\s/.test(raw[i])) i++;
+
+    const typeStart = i;
+    while (i < raw.length && isWordChar(raw[i])) i++;
+    const type = raw.slice(typeStart, i).trim().toLowerCase();
+
+    while (i < raw.length && /\s/.test(raw[i])) i++;
+    const open = raw[i];
+    const close = open === '{' ? '}' : ')';
+    i++;
+
+    // read key up to first comma (not inside braces/quotes)
+    let key = '';
+    let inQuotes = false;
+    let depth = 0;
+    const keyStart = i;
+    while (i < raw.length) {
+      const ch = raw[i];
+      if (ch === '"' && raw[i - 1] !== '\\') inQuotes = !inQuotes;
+      if (!inQuotes) {
+        if (ch === '{') depth++;
+        if (ch === '}') depth = Math.max(0, depth - 1);
+        if (ch === ',' && depth === 0) break;
+      }
+      i++;
+    }
+    key = raw.slice(keyStart, i).trim();
+
+    // fields substring: after that comma until the final closing delimiter
+    const fieldsText = (i < raw.length) ? raw.slice(i + 1, raw.lastIndexOf(close)) : '';
+    const fields = parseFields(fieldsText);
+
+    return { type, key, fields };
+  }
+
+  function parseFields(s) {
+    // Minimal field parser: handles braced/quoted values, and # concatenation.
+    const out = {};
+    let i = 0;
+
+    function skipWsAndCommas() {
+      while (i < s.length && (/\s/.test(s[i]) || s[i] === ',')) i++;
+    }
+
+    function readFieldName() {
+      skipWsAndCommas();
+      const start = i;
+      while (i < s.length && /[A-Za-z0-9_\-]/.test(s[i])) i++;
+      return s.slice(start, i).trim().toLowerCase();
+    }
+
+    function skipToEquals() {
+      while (i < s.length && s[i] !== '=') i++;
+      if (s[i] === '=') i++;
+    }
+
+    function readBraced() {
+      // assumes s[i] === '{'
+      let depth = 1;
+      i++; // skip {
+      const start = i;
+      while (i < s.length) {
+        if (s[i] === '{') depth++;
+        else if (s[i] === '}') depth--;
+        if (depth === 0) {
+          const val = s.slice(start, i);
+          i++; // skip }
+          return val;
+        }
+        i++;
+      }
+      return s.slice(start); // fallback
+    }
+
+    function readQuoted() {
+      // assumes s[i] === '"'
+      i++; // skip "
+      const start = i;
+      while (i < s.length) {
+        if (s[i] === '"' && s[i - 1] !== '\\') {
+          const val = s.slice(start, i);
+          i++; // skip "
+          return val;
+        }
+        i++;
+      }
+      return s.slice(start);
+    }
+
+    function readBare() {
+      const start = i;
+      while (i < s.length && s[i] !== ',' && s[i] !== '\n' && s[i] !== '\r' && s[i] !== '#') i++;
+      return s.slice(start, i).trim();
+    }
+
+    function readValue() {
+      const parts = [];
+      while (i < s.length) {
+        while (i < s.length && /\s/.test(s[i])) i++;
+
+        let part = '';
+        if (s[i] === '{') part = readBraced();
+        else if (s[i] === '"') part = readQuoted();
+        else part = readBare();
+
+        parts.push(part);
+
+        while (i < s.length && /\s/.test(s[i])) i++;
+        if (s[i] === '#') { i++; continue; }
+        break;
+      }
+      return parts.join('');
+    }
+
+    while (i < s.length) {
+      const name = readFieldName();
+      if (!name) break;
+      skipToEquals();
+      while (i < s.length && /\s/.test(s[i])) i++;
+      const val = readValue();
+      out[name] = val;
+      // move to next comma (if not already there)
+      while (i < s.length && s[i] !== ',') i++;
+      // loop continues and will skip commas/whitespace
+    }
+    return out;
+  }
+
+  // --- Sorting key helpers ---
+
+  function latexishToPlain(str) {
+    if (!str) return '';
+    let s = String(str);
+
+    // Remove outer braces repeatedly
+    while (s.startsWith('{') && s.endsWith('}')) s = s.slice(1, -1).trim();
+
+    // Replace common TeX accent commands with the base letter
+    s = s.replace(/\\[`'"^~=.Hckuvtbdrc]\s*\{?\s*([A-Za-z])\s*\}?/g, '$1');
+
+    // Common ligatures/specials
+    s = s.replace(/\\ss\b/g, 'ss')
+         .replace(/\\ae\b/g, 'ae')
+         .replace(/\\AE\b/g, 'AE')
+         .replace(/\\oe\b/g, 'oe')
+         .replace(/\\OE\b/g, 'OE')
+         .replace(/\\aa\b/g, 'aa')
+         .replace(/\\AA\b/g, 'AA');
+
+    // Drop remaining backslashes and braces
+    s = s.replace(/[{}\\]/g, '');
+
+    // Collapse whitespace
+    s = s.replace(/\s+/g, ' ').trim();
+    return s;
+  }
+
+  function firstAuthorSurname(fields) {
+    const authorRaw = fields.author || fields.editor || '';
+    if (!authorRaw) return '';
+    const author = latexishToPlain(authorRaw);
+
+    // split authors by " and " (BibTeX standard)
+    const parts = author.split(/\s+and\s+/i).map(x => x.trim()).filter(Boolean);
+    const first = parts[0] || author;
+
+    // BibTeX name formats:
+    // - "Last, First"
+    // - "First von Last"
+    // We'll take:
+    // - before comma if comma exists
+    // - otherwise last token
+    if (first.includes(',')) {
+      return first.split(',')[0].trim();
+    }
+    const tokens = first.split(/\s+/).filter(Boolean);
+    return tokens[tokens.length - 1] || first.trim();
+  }
+
+  function yearValue(fields) {
+    const y = (fields.year || '').match(/\d{4}/);
+    return y ? parseInt(y[0], 10) : 9999;
+  }
+
+  function titleValue(fields) {
+    return latexishToPlain(fields.title || '');
+  }
+
+  function sortEntries(entries) {
+    // Stable sort by adding original index
+    const enriched = entries.map((e, idx) => ({ e, idx }));
+    enriched.sort((A, B) => {
+      const a = A.e, b = B.e;
+      const aSur = firstAuthorSurname(a.fields);
+      const bSur = firstAuthorSurname(b.fields);
+
+      const surCmp = collator.compare(aSur || a.key || '', bSur || b.key || '');
+      if (surCmp !== 0) return surCmp;
+
+      const yCmp = (yearValue(a.fields) - yearValue(b.fields));
+      if (yCmp !== 0) return yCmp;
+
+      const tCmp = collator.compare(titleValue(a.fields) || a.key || '', titleValue(b.fields) || b.key || '');
+      if (tCmp !== 0) return tCmp;
+
+      const kCmp = collator.compare(a.key || '', b.key || '');
+      if (kCmp !== 0) return kCmp;
+
+      return A.idx - B.idx;
+    });
+    return enriched.map(x => x.e);
+  }
+
+  function buildOutput(preface, nonsortable, sorted) {
+    // Keep preface as-is; then output non-sortable entries; then sorted entries.
+    const chunks = [];
+    if (preface && preface.trim().length) chunks.push(preface.trimEnd());
+
+    for (const e of nonsortable) chunks.push(e.raw.trim());
+    for (const e of sorted) chunks.push(e.raw.trim());
+
+    return chunks.filter(Boolean).join('\n\n') + '\n';
+  }
+
+  // --- UI wiring ---
+
+  async function loadFile(file) {
+    resetAll();
+    try {
+      loadedText = await file.text();
+      loadedName = file.name;
+      elStatus.textContent = `Loaded: ${loadedName} (${loadedText.length.toLocaleString()} chars)`;
+      elSort.disabled = false;
+      elClear.disabled = false;
+      setMessage('Ready to sort.', 'ok');
+    } catch (err) {
+      setMessage(`Failed to read file: ${err}`, 'err');
+    }
+  }
+
+  elFile.addEventListener('change', () => {
+    const f = elFile.files && elFile.files[0];
+    if (f) loadFile(f);
+  });
+
+  elDrop.addEventListener('dragover', (e) => { e.preventDefault(); elDrop.classList.add('drag'); });
+  elDrop.addEventListener('dragleave', () => elDrop.classList.remove('drag'));
+  elDrop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    elDrop.classList.remove('drag');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) loadFile(f);
+  });
+
+  elDrop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') elFile.click();
+  });
+
+  elSort.addEventListener('click', () => {
+    setMessage('', '');
+    cleanupBlobUrl();
+    setDownloadEnabled(false);
+
+    if (!loadedText) {
+      setMessage('No file loaded.', 'err');
+      return;
+    }
+
+    try {
+      const parsed = parseBibFile(loadedText);
+
+      if (parsed.sortable.length === 0) {
+        setMessage('No sortable BibTeX entries found (nothing like @article/@inproceedings/etc).', 'err');
+        return;
+      }
+
+      const sorted = sortEntries(parsed.sortable);
+      const output = buildOutput(parsed.preface, parsed.nonsortable, sorted);
+
+      elOut.value = output;
+
+      const blob = new Blob([output], { type: 'text/x-bibtex;charset=utf-8' });
+      lastBlobUrl = URL.createObjectURL(blob);
+      elDownload.href = lastBlobUrl;
+      elDownload.download = 'ordered.bib';
+      setDownloadEnabled(true);
+
+      const preview = sorted.slice(0, 8).map(e => {
+        const sur = firstAuthorSurname(e.fields) || '(no author/editor)';
+        const y = (e.fields.year || '').trim() || '????';
+        return `${sur} — ${y} — ${e.key || '(no key)'}`;
+      }).join('<br/>');
+
+      elStatus.textContent = `Sorted ${sorted.length} entries.`;
+      setMessage(`Done. Preview (first 8):<br/><br/>${preview}`, 'ok');
+    } catch (err) {
+      setMessage(`Sort failed: ${err && err.message ? err.message : String(err)}`, 'err');
+    }
+  });
+
+  elClear.addEventListener('click', resetAll);
+
+  // Start disabled
+  setDownloadEnabled(false);
+})();
+</script>
+</body>
+</html>
